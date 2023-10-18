@@ -1,0 +1,173 @@
+비동기 입출력 모델을 사용할 땐 기존 함수를 사용하면 안된다.
+
+입출력에 사용되는 함수와 생성 등의 동작을 하는 함수를 살펴보자.
+
+#include <windows.h>
+
+HANDLE CreateIoCompletionPort(
+	HANDLE FileHandle,
+	HANDLE ExistingCompletionPort,
+	ULONG_PTR CompletionKey,
+	DWORD NumberOfConcurrentThreads
+);
+
+return HANDLE / NULL
+
+차례대로 살펴보자.
+
+1. FileHandle = 입출력 완료 포트와 연결할 파일(또는 소켓) 핸들, 포트 생성 시 INVALID_HANDLE_VALUE값 설정
+
+2. ExistingCompletionPort = 파일(또는 소켓)과 연결할 포트 핸들, 포트 생성 시 해당 인수에 NULL값을 준다.
+
+3. CompletionKey = 완료 ★패킷에 들어갈 부가 정보(입출력 작업 완료 후 입출력 완료 포트에 저장되는 정보)
+
+4. NumberOfConcurrentThreads = 동시에 실행될 수 있는 작업자 스레드 개수, 자동 할당 시 0값을 사용한다(CPU 개수).
+
+이제 예제를 보자.
+
+HANDLE hcp = CreateIoCompletionPort(
+	INVALID_HANDLE_VALUE,
+	NULL,
+	0,
+	0);
+if(hcp == NULL){return 1;}
+
+SOCKET sock;
+...
+HANDLE hResult = CreateIoCompletionPort(
+	(HANDLE)sock,
+	hcp,
+	(ULONG_PTR)sock,			/* 통신에 필요한 정보를 담는 구조체도 전달할 수 있다. */
+	0);
+if(hResult == NULL){return 1;}
+
+==========================================================================================
+
+다음은 비동기 입출력 전용 함수이다.
+
+#include <winsock2.h>
+
+int WSASend(
+	SOCKET sock,
+	LPWSABUF lpBuffers,
+	DWORD dwBufferCount,
+	LPDWORD lpNumberOfBytesSend,
+	DWORD dwflags,
+	LPWSAOVERLAPPED lpOverlapped,
+	LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine
+);
+
+int WSARecv(
+	SOCKET sock,
+	LPWSABUF lpBuffers,
+	DWORD dwBufferCount,
+	LPDWORD lpNumverOfBytesRecvd,
+	LPDWORD lpFlags,
+	LPWSAOVERLAPPED lpOverlapped,
+	LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine
+);
+
+
+일단 뭐가 아주 많다.
+
+차례대로 천천히 알아보자.
+
+1. sock = 비동기 입출력을 할 대상 소켓
+
+2. lpBuffers = 데이터 송/수신에 사용할 버퍼이며 구조체를 생성하여 시작 주소를 넘긴다.
+
+3. dwBufferCount = 사용할 버퍼의 개수를 넘긴다.
+
+4. lpNumberOfBytesSend(Recvd) = 호출이 성공하면 보내거나 받은 바이트 수가 저장된다.
+
+5. dwFlags(lpFlags) = 옵션값 MSG_* 형태의 상수를 전달한다(send 또는 recv의 플래그 값과 같으며 기능도 동일).
+
+6. lpOverlapped = 구조체의 주솟값이다.
+			이 구조체는 비동기 입출력에 필요한 정보를 운영체제로 전달한다.
+			또, 결과를 응용 프로그램에 전달할 때도 사용된다(재사용).
+			
+7. lpCompletionRoutine = 콜백 함수(입출력 작업 완료 후 호출)이며 이 모델에서는 사용하지 않는다.
+
+==========================================================================================
+
+위 함수를 사용할 때 필요한 구조체에 대해서도 알아보자.
+
+1. WSABUF
+typedef struct __WSABUF{
+	u_long len;		/* 길이(바이트 단위) */
+	char *buf;		/* 버퍼 시작 주소 */
+} WSABUF, *LPWSABUF;
+
+
+2. WSAOVERLAPPED
+typedef struct _WSAOVERLAPPED{
+	DWORD Internal;		/* DWORD형의 변수는 전부 내부적으로 사용된다. */
+	DWORD InternalHigh;	/* 즉, 건드릴 필요가 없다. */
+	DWORD Offset;
+	DWORD OffsetHigh;
+	WSAEVENT hEvent;		/* 유일하게 얘만 사용하면 된다. 단, WSAEVENT 타입이므로 이에 대한 공부가 선행되어야 한다. */
+}WSAOVERLAPPED, *LPWSAOVERLAPPED;
+
+
+뭔가 많은데 걱정할 필요 없다.
+주석을 읽고 자세히 분석해보자.
+
+참고로, WSAOVERLAPPED와 OVERLAPPED 구조체는 서로 다르다.
+내부 변수의 이름은 동일하지만 공용체나 구조체로 감싸져 있지 않으며
+마지막 변수 역시 HANDLE이 아닌 WSAEVENT형이다. 
+
+==========================================================================================
+
+데이터 송수신에 사용되는 위 함수들은 다음과 같은 특징을 갖는다.
+
+1. Scatter / Gather 입출력 지원
+	- 데이터를 모아서 보낼 수 있다(Gather).
+	- 데이터를 흩뜨려 저장할 수 있다(Scatter).
+	- 단, WSABUF 구조체를 사용한다.
+
+2. 동기 입출력 지원
+	- 마지막 두 인수(WSAOVERALLPED)를 NULL로 주면 동기 함수로 동작한다.
+
+3. Overlapped 모델에선 hEvent와 Routine 인수를 사용된다.
+	- 단, Routine 인수(콜백 함수)의 우선순위가 높으므로 이 값이 NULL이 아닐 때만 가능하다.
+	- 즉, 콜백함수가 있으면 hEvent는 사용되지 않고 없으면 사용된다.
+
+==========================================================================================
+
+이제 마지막 함수인 결과 확인 함수를 알아보자.
+
+작업자 스레드가 입출력 결과를 처리하며 이때 사용되는 함수는 다음과 같다.
+
+#include <windows.h>
+BOOL GetQueuedCompletionStatus(
+	HANDLE CompletionPort,
+	LPDWORD lpNumberOfBytes,
+	PULONG_PTR lpCompletionKey,
+	LPOVERLAPPED *lpOverlapped,
+	DWORD dwMilliseconds
+);
+
+이 함수를 호출해둔 작업자 스레드는 완료 패킷이 들어올 때까지 대기하며,
+운영체제에 의해 실행중인 작업자 스레드의 개수가 CreateIoCompletionPort의 인수로 설정한 개수보다 작으면
+대기 상태인 작업자 스레드를 깨우고 패킷을 처리하게끔 한다.
+
+즉, 얘는 그냥 입출력 완료 포트에 패킷이 들어오는 걸 기다리는
+대기 함수라고 보면 된다.
+
+이제 이 인수들을 하나씩 살펴보자.
+
+1. CompletionPort = 입출력 완료 포트 핸들
+
+2. lpNumberOfBytes = 비동기 입출력 작업으로 전송된 바이트 수
+
+3. lpCompletionKey = CreateIoCompletionPort() 호출 시 전달한 세번째 인수값을 여기에 저장한다.
+
+4. lpOverlapped = 비동기 입출력 함수 호출 시 전달한 OVERLAPPED 구조체의 주솟값이 여기 저장된다.
+
+5. dwMilliseconds = 작업자 스레드가 대기할 시간을 밀리초 단위로 지정한다(보통 INFINITE).
+				INFINITE 사용 시 운영체제가 깨울때까지 대기한다.
+
+
+* 작업자 스레드에 특별한 사실을 알리기 위해 직접 완료 패킷을 생성하기도 한다.
+* 이때 사용되는 함수는 PostQueuedCompletionStatus() 함수다.
+* GetQueudCompletionStatus()와 인수의 의미가 비슷하므로 직접 찾아보자.
